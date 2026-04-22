@@ -34,7 +34,7 @@ Flowet bruger [Scaarups Home Assistant AULA-integration](https://github.com/scaa
 
 1. **Node-RED** ≥ 3.0 med **Node.js ≥ 18** (kræves for den native `fetch` API)
 2. **[Scaarups HA AULA-integration](https://github.com/scaarup/aula)** installeret og succesfuldt autentificeret via MitID i Home Assistant
-3. **Home Assistant** tilgængeligt på netværket fra Node-RED (f.eks. `http://192.168.1.240:8123`)
+3. **Home Assistant** tilgængeligt på netværket fra Node-RED (f.eks. `http://192.168.1.X:8123`)
 4. En **MQTT-broker** (fx Mosquitto) tilgængelig fra Node-RED
 
 ---
@@ -64,7 +64,7 @@ Hvis du ser beskedtråde i svaret, er integrationen klar.
 Tilføj til Node-REDs miljø (fx i `settings.js`, din container, eller HA's Node-RED addon-konfiguration):
 
 ```bash
-HA_URL=http://192.168.1.240:8123   # Erstat med din HA-adresse
+HA_URL=http://192.168.1.X:8123   # Erstat med din HA-adresse
 HA_TOKEN=eyJhbGci...               # Dit Long-Lived Access Token
 ```
 
@@ -217,7 +217,7 @@ The flow uses [Scaarup's Home Assistant AULA integration](https://github.com/sca
 
 1. **Node-RED** ≥ 3.0 with **Node.js ≥ 18** (required for the native `fetch` API)
 2. **[Scaarup's HA AULA integration](https://github.com/scaarup/aula)** installed and successfully authenticated via MitID in Home Assistant
-3. **Home Assistant** reachable on the network from Node-RED (e.g. `http://192.168.1.240:8123`)
+3. **Home Assistant** reachable on the network from Node-RED (e.g. `http://192.168.1.X:8123`)
 4. An **MQTT broker** (e.g. Mosquitto) reachable from Node-RED
 
 ---
@@ -247,7 +247,7 @@ If you see message threads in the response, the integration is ready.
 Add to Node-RED's environment (e.g. in `settings.js`, your container, or the HA Node-RED add-on config):
 
 ```bash
-HA_URL=http://192.168.1.240:8123   # Replace with your HA address
+HA_URL=http://192.168.1.X:8123   # Replace with your HA address
 HA_TOKEN=eyJhbGci...               # Your Long-Lived Access Token
 ```
 
