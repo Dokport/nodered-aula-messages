@@ -1,0 +1,36 @@
+{
+  "name": "nodered-aula-messages",
+  "version": "1.0.0",
+  "description": "Node-RED flow that polls the AULA (Danish school communication platform) messaging API and publishes threads and messages via MQTT.",
+  "keywords": [
+    "node-red",
+    "aula",
+    "education",
+    "skole",
+    "mqtt",
+    "denmark",
+    "home-assistant"
+  ],
+  "author": "Dokport",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dokport/nodered-aula-messages.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Dokport/nodered-aula-messages/issues"
+  },
+  "homepage": "https://github.com/Dokport/nodered-aula-messages#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "node-red": {
+    "version": ">=3.0.0"
+  },
+  "files": [
+    "flows.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ]
+}
