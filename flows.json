@@ -4,14 +4,14 @@
     "type": "tab",
     "label": "AULA Messages",
     "disabled": false,
-    "info": "Poller AULA besked-API og publicerer via MQTT.\nSæt env-variablen AULA_REFRESH_TOKEN inden første kørsel.\nSe README.md for fuld opsætningsvejledning."
+    "info": "Henter AULA-beskeder via Home Assistants REST API og publicerer via MQTT.\nKræver: HA_URL og HA_TOKEN miljøvariabler.\nSe README.md for fuld opsætningsvejledning."
   },
   {
     "id": "aula-cmt-about",
     "type": "comment",
     "z": "aula-tab-v1",
     "name": "AULA Messages → MQTT  |  github.com/Dokport/nodered-aula-messages",
-    "info": "## AULA Messages Poller\n\nHenter beskeder fra AULA og publicerer via MQTT.\n\n### Påkrævede miljøvariabler\n- `AULA_REFRESH_TOKEN` — Refresh-token fra Scaarups HA-AULA-integration\n\n### Valgfrie miljøvariabler\n- `AULA_API_VERSION` — AULA API-version (standard: `22`)\n- `MQTT_TOPIC_PREFIX` — MQTT-emnepræfiks (standard: `aula/messages`)\n\n### MQTT-broker\nRedigér config-noden **AULA MQTT Broker** med korrekt host/port.\n\n### Polling-interval\nRedigér Inject-noden **Poll AULA** — feltet *Repeat every* (standard: 300 s / 5 min).\n\n### Hent initial refresh-token\nSe README.md, afsnittet *Opsætning*.",
+    "info": "## AULA Messages Poller\n\nHenter beskeder fra AULA via Home Assistants `aula.api_call` service\nog publicerer via MQTT. Kræver Scaarups HA-AULA-integration.\n\n### Påkrævede miljøvariabler\n- `HA_URL`   — Home Assistant URL, fx `http://192.168.1.240:8123`\n- `HA_TOKEN` — HA Long-Lived Access Token (opret under Profil → Sikkerhed → Tokens)\n\n### Valgfrie miljøvariabler\n- `MQTT_TOPIC_PREFIX` — MQTT-emnepræfiks (standard: `aula/messages`)\n\n### MQTT-broker\nRedigér config-noden **AULA MQTT Broker** med korrekt host/port.\n\n### Polling-interval\nRedigér Inject-noden **Poll AULA** — feltet *Repeat every* (standard: 300 s / 5 min).",
     "x": 260,
     "y": 40,
     "wires": []
@@ -34,37 +34,21 @@
     "payloadType": "date",
     "x": 150,
     "y": 120,
-    "wires": [["aula-fn-token"]]
+    "wires": [["aula-fn-ha-fetch"]]
   },
   {
-    "id": "aula-fn-token",
+    "id": "aula-fn-ha-fetch",
     "type": "function",
     "z": "aula-tab-v1",
-    "name": "Token Manager",
-    "func": "// AULA Token Manager\n// Refreshes the OIDC access_token using the stored refresh_token.\n//\n// Required env var: AULA_REFRESH_TOKEN\n//   Initial refresh token extracted from Scaarup HA-AULA integration.\n//   After first successful refresh, subsequent tokens are stored in flow context.\n//\n// Outputs: msg.aula_token — valid AULA access token\n\nconst CLIENT_ID = '_99949a54b8b65423862aac1bf629599ed64231607a';\nconst TOKEN_URL = 'https://login.aula.dk/simplesaml/module.php/oidc/token.php';\n\n(async function () {\n    let tokenData = flow.get('aula_token_data') || {};\n    const now = Date.now();\n\n    // Reuse valid token — keep 60-second buffer to avoid last-second expiry races\n    if (tokenData.access_token && tokenData.expires_at && tokenData.expires_at > now + 60000) {\n        msg.aula_token = tokenData.access_token;\n        node.status({ fill: 'green', shape: 'dot', text: 'Token OK' });\n        node.send(msg);\n        return;\n    }\n\n    // Prefer refresh token stored from last successful refresh; fall back to env var seed\n    const refreshToken = tokenData.refresh_token || env.get('AULA_REFRESH_TOKEN');\n    if (!refreshToken) {\n        node.error('Missing AULA refresh token — set AULA_REFRESH_TOKEN env var.', msg);\n        node.status({ fill: 'red', shape: 'ring', text: 'No refresh token' });\n        return;\n    }\n\n    try {\n        node.status({ fill: 'yellow', shape: 'ring', text: 'Refreshing token...' });\n\n        const res = await fetch(TOKEN_URL, {\n            method: 'POST',\n            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n            body: new URLSearchParams({\n                grant_type: 'refresh_token',\n                refresh_token: refreshToken,\n                client_id: CLIENT_ID\n            }).toString()\n        });\n\n        if (!res.ok) {\n            const txt = await res.text();\n            throw new Error('HTTP ' + res.status + ': ' + txt.slice(0, 200));\n        }\n\n        const data = await res.json();\n        if (!data.access_token) {\n            throw new Error('No access_token in response: ' + JSON.stringify(data).slice(0, 200));\n        }\n\n        // Persist updated token data in flow context for next poll cycle\n        tokenData = {\n            access_token: data.access_token,\n            refresh_token: data.refresh_token || refreshToken,\n            expires_at: now + ((data.expires_in || 3600) * 1000)\n        };\n        flow.set('aula_token_data', tokenData);\n\n        msg.aula_token = data.access_token;\n        node.status({ fill: 'green', shape: 'dot', text: 'Token refreshed' });\n        node.send(msg);\n    } catch (err) {\n        node.error('Token refresh failed: ' + err.message, msg);\n        node.status({ fill: 'red', shape: 'ring', text: 'Refresh error' });\n    }\n})();",
+    "name": "HA API Fetcher",
+    "func": "// AULA via Home Assistant REST API\n//\n// Calls the aula.api_call service on Home Assistant, which uses the\n// integration's active MitID-authenticated session — no token management needed.\n//\n// HA service: aula.api_call (supports_response=ONLY)\n//   uri      — AULA API query string, e.g. '?method=messaging.getThreads&...'\n//   post_data — JSON string for POST requests (omit for GET)\n//\n// Required env vars:\n//   HA_URL   — Home Assistant base URL, e.g. http://192.168.1.240:8123\n//   HA_TOKEN — Long-Lived Access Token (HA: Profile → Security → Long-Lived Access Tokens)\n//\n// Output: msg.payload = { timestamp, threadCount, unreadCount, threads[] }\n\nconst HA_URL = (env.get('HA_URL') || 'http://homeassistant.local:8123').replace(/\\/$/, '');\nconst HA_TOKEN = env.get('HA_TOKEN');\nconst MAX_PAGES = 20; // Safety cap against runaway pagination\n\nif (!HA_TOKEN) {\n    node.error(\n        'Missing HA_TOKEN. Create a Long-Lived Token in Home Assistant: ' +\n        'Profile → Security → Long-Lived Access Tokens.',\n        msg\n    );\n    node.status({ fill: 'red', shape: 'ring', text: 'No HA_TOKEN' });\n    return;\n}\n\nconst SERVICE_URL = HA_URL + '/api/services/aula/api_call?return_response';\nconst HEADERS = {\n    'Authorization': 'Bearer ' + HA_TOKEN,\n    'Content-Type': 'application/json'\n};\n\n/**\n * Call aula.api_call via HA REST API and return the AULA response object.\n * HA wraps the service return value as { service_response: <data> }.\n */\nasync function aulaGet(uri) {\n    const res = await fetch(SERVICE_URL, {\n        method: 'POST',\n        headers: HEADERS,\n        body: JSON.stringify({ uri: uri })\n    });\n    if (!res.ok) {\n        const txt = await res.text();\n        throw new Error(\n            'HA aula.api_call failed (HTTP ' + res.status + '): ' + txt.slice(0, 300)\n        );\n    }\n    const body = await res.json();\n    // HA wraps response as { service_response: <actual_aula_response> }\n    const aula = body.service_response !== undefined ? body.service_response : body;\n    if (aula.raw_response) {\n        // custom_api_call returns { raw_response: '...' } when AULA sends non-JSON\n        throw new Error('AULA returned non-JSON: ' + String(aula.raw_response).slice(0, 200));\n    }\n    return aula;\n}\n\nasync function fetchAllThreads() {\n    const threads = [];\n    for (let page = 0; page < MAX_PAGES; page++) {\n        const uri = '?method=messaging.getThreads&sortOn=date&orderDirection=desc&page=' + page;\n        node.status({ fill: 'blue', shape: 'dot', text: 'Threads p' + page + '...' });\n        const res = await aulaGet(uri);\n        if (!res.data || !res.data.threads) {\n            throw new Error(\n                'Unexpected getThreads response on page ' + page + ': ' +\n                JSON.stringify(res).slice(0, 200)\n            );\n        }\n        const pageThreads = res.data.threads;\n        threads.push.apply(threads, pageThreads);\n        node.status({ fill: 'blue', shape: 'dot', text: 'Threads p' + page + ' (' + threads.length + ')' });\n        if (pageThreads.length < 10) break; // Fewer than 10 = last page\n    }\n    return threads;\n}\n\nasync function fetchMessagesForThread(threadId) {\n    const messages = [];\n    for (let page = 0; page < MAX_PAGES; page++) {\n        const uri = '?method=messaging.getMessagesForThread&threadId=' + threadId + '&page=' + page;\n        const res = await aulaGet(uri);\n        if (!res.data || !res.data.messages || res.data.messages.length === 0) break;\n        messages.push.apply(messages, res.data.messages);\n        if (res.data.messages.length < 20) break; // Fewer than 20 = last page\n    }\n    return messages;\n}\n\n(async function () {\n    try {\n        node.status({ fill: 'blue', shape: 'ring', text: 'Henter via HA...' });\n        const threads = await fetchAllThreads();\n\n        const enrichedThreads = [];\n        for (let i = 0; i < threads.length; i++) {\n            node.status({ fill: 'blue', shape: 'dot', text: 'Beskeder ' + (i + 1) + '/' + threads.length });\n            const messages = await fetchMessagesForThread(threads[i].id);\n            enrichedThreads.push({ thread: threads[i], messages: messages });\n        }\n\n        const unreadCount = threads.filter(function (t) { return !t.read; }).length;\n        msg.payload = {\n            timestamp: new Date().toISOString(),\n            threadCount: threads.length,\n            unreadCount: unreadCount,\n            threads: enrichedThreads\n        };\n\n        node.status({\n            fill: 'green', shape: 'dot',\n            text: threads.length + ' tråde, ' + unreadCount + ' ulæste'\n        });\n        node.send(msg);\n    } catch (err) {\n        node.error('HA/AULA fejl: ' + err.message, msg);\n        node.status({ fill: 'red', shape: 'ring', text: err.message.slice(0, 50) });\n    }\n})();",
     "outputs": 1,
     "timeout": 0,
     "noerr": 0,
     "initialize": "",
     "finalize": "",
     "libs": [],
-    "x": 350,
-    "y": 120,
-    "wires": [["aula-fn-poll"]]
-  },
-  {
-    "id": "aula-fn-poll",
-    "type": "function",
-    "z": "aula-tab-v1",
-    "name": "AULA Poller",
-    "func": "// AULA Message Poller\n// Fetches all message threads and their messages from the AULA messaging API.\n// Paginates automatically until all pages are retrieved.\n//\n// Input:  msg.aula_token — valid AULA access token (set by Token Manager)\n// Output: msg.payload    — { timestamp, threadCount, unreadCount, threads[] }\n//\n// Optional env vars:\n//   AULA_API_VERSION — API version (default: '22')\n\nconst API_VERSION = env.get('AULA_API_VERSION') || '22';\nconst BASE_URL = 'https://www.aula.dk/api/v' + API_VERSION + '/';\nconst UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0';\nconst MAX_PAGES = 20; // Safety cap against runaway pagination\n\nconst token = msg.aula_token;\nif (!token) {\n    node.error('No AULA access token in msg.aula_token', msg);\n    return;\n}\n\nasync function aulaGet(method, extraParams) {\n    const url = BASE_URL + '?method=' + method + (extraParams || '') +\n                '&access_token=' + encodeURIComponent(token);\n    const res = await fetch(url, { headers: { 'User-Agent': UA } });\n    if (!res.ok) throw new Error(method + ' failed: HTTP ' + res.status);\n    return res.json();\n}\n\nasync function fetchAllThreads() {\n    const threads = [];\n    for (let page = 0; page < MAX_PAGES; page++) {\n        const data = await aulaGet(\n            'messaging.getThreads',\n            '&sortOn=date&orderDirection=desc&page=' + page\n        );\n        if (!data.data || !data.data.threads) {\n            throw new Error('Unexpected getThreads response on page ' + page);\n        }\n        const pageThreads = data.data.threads;\n        threads.push.apply(threads, pageThreads);\n        node.status({ fill: 'blue', shape: 'dot', text: 'Threads p' + page + ' (' + threads.length + ')' });\n        if (pageThreads.length < 10) break; // AULA returns up to 10 per page; fewer = last page\n    }\n    return threads;\n}\n\nasync function fetchMessagesForThread(threadId) {\n    const messages = [];\n    for (let page = 0; page < MAX_PAGES; page++) {\n        const data = await aulaGet(\n            'messaging.getMessagesForThread',\n            '&threadId=' + threadId + '&page=' + page\n        );\n        if (!data.data || !data.data.messages || data.data.messages.length === 0) break;\n        messages.push.apply(messages, data.data.messages);\n        if (data.data.messages.length < 20) break; // Fewer than 20 = last page\n    }\n    return messages;\n}\n\n(async function () {\n    try {\n        node.status({ fill: 'blue', shape: 'ring', text: 'Fetching threads...' });\n        const threads = await fetchAllThreads();\n\n        const enrichedThreads = [];\n        for (let i = 0; i < threads.length; i++) {\n            node.status({ fill: 'blue', shape: 'dot', text: 'Messages ' + (i + 1) + '/' + threads.length });\n            const messages = await fetchMessagesForThread(threads[i].id);\n            enrichedThreads.push({ thread: threads[i], messages: messages });\n        }\n\n        const unreadCount = threads.filter(function (t) { return !t.read; }).length;\n        msg.payload = {\n            timestamp: new Date().toISOString(),\n            threadCount: threads.length,\n            unreadCount: unreadCount,\n            threads: enrichedThreads\n        };\n\n        node.status({\n            fill: 'green', shape: 'dot',\n            text: threads.length + ' threads, ' + unreadCount + ' unread'\n        });\n        node.send(msg);\n    } catch (err) {\n        node.error('AULA poll error: ' + err.message, msg);\n        node.status({ fill: 'red', shape: 'ring', text: err.message.slice(0, 50) });\n    }\n})();",
-    "outputs": 1,
-    "timeout": 0,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 540,
+    "x": 360,
     "y": 120,
     "wires": [["aula-fn-fmt", "aula-dbg-v1"]]
   },
@@ -80,7 +64,7 @@
     "initialize": "",
     "finalize": "",
     "libs": [],
-    "x": 730,
+    "x": 580,
     "y": 120,
     "wires": [["aula-mq-out"]]
   },
@@ -98,7 +82,7 @@
     "correl": "",
     "expiry": "",
     "broker": "aula-mb-cfg",
-    "x": 930,
+    "x": 780,
     "y": 120,
     "wires": []
   },
@@ -115,7 +99,7 @@
     "targetType": "msg",
     "statusVal": "",
     "statusType": "auto",
-    "x": 780,
+    "x": 620,
     "y": 200,
     "wires": []
   },
@@ -136,7 +120,7 @@
     "z": "aula-tab-v1",
     "name": "Error details",
     "active": true,
-    "tosidebar": true,
+    "tosidebar":  true,
     "console": false,
     "tostatus": false,
     "complete": "true",

@@ -1,6 +1,6 @@
 {
   "name": "nodered-aula-messages",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Node-RED flow that polls the AULA (Danish school communication platform) messaging API and publishes threads and messages via MQTT.",
   "keywords": [
     "node-red",

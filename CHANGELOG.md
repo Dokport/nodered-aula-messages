@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-22
+
+### Changed
+
+- **Architecture overhaul**: replaced direct OIDC token refresh with Home Assistant REST API proxy
+  - Removed: Token Manager node (OIDC refresh flow)
+  - Removed: `AULA_REFRESH_TOKEN` environment variable
+  - Added: **HA API Fetcher** node — calls `aula.api_call` service via HA REST API
+  - Added: `HA_URL` and `HA_TOKEN` environment variables
+- Flow now delegates authentication entirely to Scaarup's HA integration; Node-RED only
+  needs a HA Long-Lived Access Token, not any AULA session material
+- Updated README setup instructions and troubleshooting guide accordingly
+
+### Fixed
+
+- Token approach (v1.0.0) did not work: Scaarup's integration stores the AULA session
+  in memory, not in `core.config_entries` — there is no refresh_token on disk to extract
+
+---
+
 ## [1.0.0] - 2026-04-22
 
 ### Added
