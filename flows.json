@@ -11,7 +11,7 @@
     "type": "comment",
     "z": "aula-tab-v1",
     "name": "AULA Messages → MQTT  |  github.com/Dokport/nodered-aula-messages",
-    "info": "## AULA Messages Poller\n\nHenter beskeder fra AULA via Home Assistants `aula.api_call` service\nog publicerer via MQTT. Kræver Scaarups HA-AULA-integration.\n\n### Påkrævede miljøvariabler\n- `HA_URL`   — Home Assistant URL, fx `http://192.168.1.240:8123`\n- `HA_TOKEN` — HA Long-Lived Access Token (opret under Profil → Sikkerhed → Tokens)\n\n### Valgfrie miljøvariabler\n- `MQTT_TOPIC_PREFIX` — MQTT-emnepræfiks (standard: `aula/messages`)\n\n### MQTT-broker\nRedigér config-noden **AULA MQTT Broker** med korrekt host/port.\n\n### Polling-interval\nRedigér Inject-noden **Poll AULA** — feltet *Repeat every* (standard: 300 s / 5 min).",
+    "info": "## AULA Messages Poller\n\nHenter beskeder fra AULA via Home Assistants `aula.api_call` service\nog publicerer via MQTT. Bruger Node-REDs native http request-node.\n\n### Påkrævede miljøvariabler\n- `HA_URL`   — Home Assistant URL, fx `http://192.168.1.240:8123`\n- `HA_TOKEN` — HA Long-Lived Access Token (Profil → Sikkerhed → Tokens)\n\n### Valgfrie miljøvariabler\n- `MQTT_TOPIC_PREFIX` — MQTT-emnepræfiks (standard: `aula/messages`)\n\n### Flow-arkitektur\nSetup → HTTP Request → Process (loop hvis flere sider, ellers → Formatter)",
     "x": 260,
     "y": 40,
     "wires": []
@@ -32,40 +32,79 @@
     "topic": "poll",
     "payload": "",
     "payloadType": "date",
-    "x": 150,
+    "x": 140,
     "y": 120,
-    "wires": [["aula-fn-ha-fetch"]]
+    "wires": [["aula-fn-setup"]]
   },
   {
-    "id": "aula-fn-ha-fetch",
+    "id": "aula-fn-setup",
     "type": "function",
     "z": "aula-tab-v1",
-    "name": "HA API Fetcher",
-    "func": "// AULA via Home Assistant REST API\n//\n// Calls the aula.api_call service on Home Assistant, which uses the\n// integration's active MitID-authenticated session — no token management needed.\n//\n// HA service: aula.api_call (supports_response=ONLY)\n//   uri      — AULA API query string, e.g. '?method=messaging.getThreads&...'\n//   post_data — JSON string for POST requests (omit for GET)\n//\n// Required env vars:\n//   HA_URL   — Home Assistant base URL, e.g. http://192.168.1.240:8123\n//   HA_TOKEN — Long-Lived Access Token (HA: Profile → Security → Long-Lived Access Tokens)\n//\n// Output: msg.payload = { timestamp, threadCount, unreadCount, threads[] }\n\nconst HA_URL = (env.get('HA_URL') || 'http://homeassistant.local:8123').replace(/\\/$/, '');\nconst HA_TOKEN = env.get('HA_TOKEN');\nconst MAX_PAGES = 20; // Safety cap against runaway pagination\n\nif (!HA_TOKEN) {\n    node.error(\n        'Missing HA_TOKEN. Create a Long-Lived Token in Home Assistant: ' +\n        'Profile → Security → Long-Lived Access Tokens.',\n        msg\n    );\n    node.status({ fill: 'red', shape: 'ring', text: 'No HA_TOKEN' });\n    return;\n}\n\nconst SERVICE_URL = HA_URL + '/api/services/aula/api_call?return_response';\nconst HEADERS = {\n    'Authorization': 'Bearer ' + HA_TOKEN,\n    'Content-Type': 'application/json'\n};\n\n/**\n * Call aula.api_call via HA REST API and return the AULA response object.\n * HA wraps the service return value as { service_response: <data> }.\n */\nasync function aulaGet(uri) {\n    const res = await fetch(SERVICE_URL, {\n        method: 'POST',\n        headers: HEADERS,\n        body: JSON.stringify({ uri: uri })\n    });\n    if (!res.ok) {\n        const txt = await res.text();\n        throw new Error(\n            'HA aula.api_call failed (HTTP ' + res.status + '): ' + txt.slice(0, 300)\n        );\n    }\n    const body = await res.json();\n    // HA wraps response as { service_response: <actual_aula_response> }\n    const aula = body.service_response !== undefined ? body.service_response : body;\n    if (aula.raw_response) {\n        // custom_api_call returns { raw_response: '...' } when AULA sends non-JSON\n        throw new Error('AULA returned non-JSON: ' + String(aula.raw_response).slice(0, 200));\n    }\n    return aula;\n}\n\nasync function fetchAllThreads() {\n    const threads = [];\n    for (let page = 0; page < MAX_PAGES; page++) {\n        const uri = '?method=messaging.getThreads&sortOn=date&orderDirection=desc&page=' + page;\n        node.status({ fill: 'blue', shape: 'dot', text: 'Threads p' + page + '...' });\n        const res = await aulaGet(uri);\n        if (!res.data || !res.data.threads) {\n            throw new Error(\n                'Unexpected getThreads response on page ' + page + ': ' +\n                JSON.stringify(res).slice(0, 200)\n            );\n        }\n        const pageThreads = res.data.threads;\n        threads.push.apply(threads, pageThreads);\n        node.status({ fill: 'blue', shape: 'dot', text: 'Threads p' + page + ' (' + threads.length + ')' });\n        if (pageThreads.length < 10) break; // Fewer than 10 = last page\n    }\n    return threads;\n}\n\nasync function fetchMessagesForThread(threadId) {\n    const messages = [];\n    for (let page = 0; page < MAX_PAGES; page++) {\n        const uri = '?method=messaging.getMessagesForThread&threadId=' + threadId + '&page=' + page;\n        const res = await aulaGet(uri);\n        if (!res.data || !res.data.messages || res.data.messages.length === 0) break;\n        messages.push.apply(messages, res.data.messages);\n        if (res.data.messages.length < 20) break; // Fewer than 20 = last page\n    }\n    return messages;\n}\n\n(async function () {\n    try {\n        node.status({ fill: 'blue', shape: 'ring', text: 'Henter via HA...' });\n        const threads = await fetchAllThreads();\n\n        const enrichedThreads = [];\n        for (let i = 0; i < threads.length; i++) {\n            node.status({ fill: 'blue', shape: 'dot', text: 'Beskeder ' + (i + 1) + '/' + threads.length });\n            const messages = await fetchMessagesForThread(threads[i].id);\n            enrichedThreads.push({ thread: threads[i], messages: messages });\n        }\n\n        const unreadCount = threads.filter(function (t) { return !t.read; }).length;\n        msg.payload = {\n            timestamp: new Date().toISOString(),\n            threadCount: threads.length,\n            unreadCount: unreadCount,\n            threads: enrichedThreads\n        };\n\n        node.status({\n            fill: 'green', shape: 'dot',\n            text: threads.length + ' tråde, ' + unreadCount + ' ulæste'\n        });\n        node.send(msg);\n    } catch (err) {\n        node.error('HA/AULA fejl: ' + err.message, msg);\n        node.status({ fill: 'red', shape: 'ring', text: err.message.slice(0, 50) });\n    }\n})();",
+    "name": "Setup Request",
+    "func": "// AULA Setup Request\n// Initializes poll state (on fresh Inject) or reads existing state (on loop-back).\n// Builds the HA REST API request for the current polling phase.\n//\n// State machine phases:\n//   'threads' — fetching paginated thread list via messaging.getThreads\n//   'messages' — fetching messages per thread via messaging.getMessagesForThread\n//\n// Required env vars: HA_URL, HA_TOKEN\n\nlet HA_URL = env.get('HA_URL') || 'http://homeassistant.local:8123';\nif (HA_URL[HA_URL.length - 1] === '/') HA_URL = HA_URL.slice(0, -1);\n\nconst HA_TOKEN = env.get('HA_TOKEN');\nif (!HA_TOKEN) {\n    node.error('Missing HA_TOKEN. Create a Long-Lived Token in HA: Profile → Security → Long-Lived Access Tokens.', msg);\n    node.status({ fill: 'red', shape: 'ring', text: 'No HA_TOKEN' });\n    return null;\n}\n\n// Fresh poll when triggered by Inject (msg.topic === 'poll') or state is absent\nlet state = flow.get('aula_state');\nif (!state || msg.topic === 'poll') {\n    state = {\n        phase: 'threads',\n        threads: [],\n        threadPage: 0,\n        threadIdx: 0,\n        msgPage: 0,\n        currentMsgs: [],\n        enriched: []\n    };\n    // Change topic so loop-back messages are not mistaken for a fresh poll\n    msg.topic = 'aula-loop';\n    node.status({ fill: 'blue', shape: 'ring', text: 'Starter poll...' });\n}\n\n// Determine which AULA API method to call based on current phase\nlet uri;\nif (state.phase === 'threads') {\n    uri = '?method=messaging.getThreads&sortOn=date&orderDirection=desc&page=' + state.threadPage;\n    node.status({ fill: 'blue', shape: 'dot', text: 'Tråde s.' + state.threadPage });\n} else {\n    const t = state.threads[state.threadIdx];\n    uri = '?method=messaging.getMessagesForThread&threadId=' + t.id + '&page=' + state.msgPage;\n    node.status({ fill: 'blue', shape: 'dot', text: 'Beskeder ' + (state.threadIdx + 1) + '/' + state.threads.length });\n}\n\nflow.set('aula_state', state);\n\n// Set HTTP request properties read by the http request node downstream\nmsg.url = HA_URL + '/api/services/aula/api_call?return_response';\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': 'Bearer ' + HA_TOKEN,\n    'Content-Type': 'application/json'\n};\nmsg.payload = { uri: uri };\n\nreturn msg;",
     "outputs": 1,
     "timeout": 0,
     "noerr": 0,
     "initialize": "",
     "finalize": "",
     "libs": [],
-    "x": 360,
+    "x": 340,
     "y": 120,
-    "wires": [["aula-fn-fmt", "aula-dbg-v1"]]
+    "wires": [["aula-hr-ha"]]
+  },
+  {
+    "id": "aula-hr-ha",
+    "type": "http request",
+    "z": "aula-tab-v1",
+    "name": "HA aula.api_call",
+    "method": "POST",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 540,
+    "y": 120,
+    "wires": [["aula-fn-process"]]
+  },
+  {
+    "id": "aula-fn-process",
+    "type": "function",
+    "z": "aula-tab-v1",
+    "name": "Process Response",
+    "func": "// AULA Process Response\n// Processes the HA API response and advances the state machine.\n//\n// Output 1 — loop back to Setup Request (more pages to fetch)\n// Output 2 — done, send to MQTT Formatter\n\nlet state = flow.get('aula_state');\nif (!state) {\n    node.error('Poll-tilstand mangler — genstart poll via Inject', msg);\n    return null;\n}\n\n// Check HTTP status\nif (msg.statusCode < 200 || msg.statusCode >= 300) {\n    node.error('HA HTTP ' + msg.statusCode + ': ' + JSON.stringify(msg.payload).slice(0, 200), msg);\n    flow.set('aula_state', null);\n    node.status({ fill: 'red', shape: 'ring', text: 'HTTP ' + msg.statusCode });\n    return null;\n}\n\n// Unwrap HA service_response envelope: { service_response: <aula_json> }\nconst body = msg.payload;\nconst aula = (body && body.service_response !== undefined) ? body.service_response : body;\n\nif (state.phase === 'threads') {\n    // ── Thread pagination ──────────────────────────────────────────────────────\n    if (!aula || !aula.data || !aula.data.threads) {\n        node.error('Uventet getThreads-svar: ' + JSON.stringify(aula).slice(0, 200), msg);\n        flow.set('aula_state', null);\n        return null;\n    }\n    const pageThreads = aula.data.threads;\n    state.threads = state.threads.concat(pageThreads);\n\n    if (pageThreads.length >= 10) {\n        // AULA returns up to 10 per page; exactly 10 means there may be more\n        state.threadPage++;\n        flow.set('aula_state', state);\n        return [msg, null]; // output 1: loop — fetch next thread page\n    }\n\n    // All thread pages fetched — switch to message phase\n    state.phase = 'messages';\n    state.threadIdx = 0;\n    state.msgPage = 0;\n    state.currentMsgs = [];\n    flow.set('aula_state', state);\n\n    if (state.threads.length === 0) {\n        // No threads at all — publish empty result immediately\n        flow.set('aula_state', null);\n        msg.payload = { timestamp: new Date().toISOString(), threadCount: 0, unreadCount: 0, threads: [] };\n        node.status({ fill: 'green', shape: 'dot', text: '0 tråde' });\n        return [null, msg]; // output 2: done\n    }\n    return [msg, null]; // output 1: loop — start fetching first thread's messages\n\n} else {\n    // ── Message pagination ─────────────────────────────────────────────────────\n    const pageMsgs = (aula && aula.data && aula.data.messages) ? aula.data.messages : [];\n    state.currentMsgs = state.currentMsgs.concat(pageMsgs);\n\n    if (pageMsgs.length >= 20) {\n        // More message pages for current thread\n        state.msgPage++;\n        flow.set('aula_state', state);\n        return [msg, null]; // output 1: loop\n    }\n\n    // Done with this thread's messages — store and move to next thread\n    state.enriched.push({\n        thread: state.threads[state.threadIdx],\n        messages: state.currentMsgs\n    });\n    state.threadIdx++;\n\n    if (state.threadIdx < state.threads.length) {\n        state.msgPage = 0;\n        state.currentMsgs = [];\n        flow.set('aula_state', state);\n        return [msg, null]; // output 1: loop — fetch next thread's messages\n    }\n\n    // ── All threads and messages fetched ───────────────────────────────────────\n    const unreadCount = state.threads.filter(function (t) { return !t.read; }).length;\n    msg.payload = {\n        timestamp: new Date().toISOString(),\n        threadCount: state.threads.length,\n        unreadCount: unreadCount,\n        threads: state.enriched\n    };\n    flow.set('aula_state', null);\n    node.status({ fill: 'green', shape: 'dot', text: state.threads.length + ' tråde, ' + unreadCount + ' ulæste' });\n    return [null, msg]; // output 2: done — forward to MQTT Formatter\n}",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 740,
+    "y": 120,
+    "wires": [
+      ["aula-fn-setup"],
+      ["aula-fn-fmt", "aula-dbg-v1"]
+    ]
   },
   {
     "id": "aula-fn-fmt",
     "type": "function",
     "z": "aula-tab-v1",
     "name": "MQTT Formatter",
-    "func": "// AULA MQTT Formatter\n// Converts raw AULA thread data into per-topic MQTT messages.\n// Returns an array so Node-RED sends each element as a separate message.\n//\n// Published topics (relative to PREFIX):\n//   {PREFIX}          — full thread summary (retained)\n//   {PREFIX}/status   — heartbeat with thread/unread counts (retained)\n//   {PREFIX}/{id}     — per-thread detail with full message text (retained)\n//   {PREFIX}/unread   — list of unread threads only (NOT retained)\n//\n// Optional env vars:\n//   MQTT_TOPIC_PREFIX — topic prefix (default: 'aula/messages')\n\nconst PREFIX = env.get('MQTT_TOPIC_PREFIX') || 'aula/messages';\nconst data = msg.payload;\n\nif (!data || !data.threads) {\n    node.warn('No AULA thread data to publish');\n    return null;\n}\n\nfunction stripHtml(html) {\n    if (!html) return '';\n    return String(html).replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n}\n\nconst out = [];\n\n// 1. Status heartbeat — always published so HA sensors stay fresh\nout.push({\n    topic: PREFIX + '/status',\n    payload: JSON.stringify({\n        timestamp: data.timestamp,\n        threadCount: data.threadCount,\n        unreadCount: data.unreadCount\n    }),\n    qos: 1,\n    retain: true\n});\n\n// 2. Summary of all threads\nout.push({\n    topic: PREFIX,\n    payload: JSON.stringify({\n        timestamp: data.timestamp,\n        threadCount: data.threadCount,\n        unreadCount: data.unreadCount,\n        threads: data.threads.map(function (item) {\n            return {\n                id: item.thread.id,\n                subject: item.thread.subject || '',\n                read: item.thread.read || false,\n                messageCount: item.messages.length\n            };\n        })\n    }),\n    qos: 1,\n    retain: true\n});\n\n// 3. Per-thread detail with full message text\ndata.threads.forEach(function (item) {\n    var t = item.thread;\n    var formatted = item.messages\n        .filter(function (m) { return !m.messageType || m.messageType === 'Message'; })\n        .map(function (m) {\n            var text = '';\n            try {\n                text = (m.text && m.text.html)\n                    ? stripHtml(m.text.html)\n                    : stripHtml(String(m.text || ''));\n            } catch (e) { text = ''; }\n            return {\n                id: m.id,\n                sendDateTime: m.sendDateTime,\n                sender: (m.sender && m.sender.fullName) ? m.sender.fullName : 'Unknown',\n                text: text,\n                messageType: m.messageType || 'Message'\n            };\n        });\n    out.push({\n        topic: PREFIX + '/' + t.id,\n        payload: JSON.stringify({\n            id: t.id,\n            subject: t.subject || '',\n            read: t.read || false,\n            messageCount: formatted.length,\n            messages: formatted\n        }),\n        qos: 1,\n        retain: true\n    });\n});\n\n// 4. Unread-only list — not retained, useful for triggering HA automations\nvar unread = data.threads.filter(function (item) { return !item.thread.read; });\nif (unread.length > 0) {\n    out.push({\n        topic: PREFIX + '/unread',\n        payload: JSON.stringify({\n            timestamp: data.timestamp,\n            count: unread.length,\n            threads: unread.map(function (item) {\n                return { id: item.thread.id, subject: item.thread.subject || '' };\n            })\n        }),\n        qos: 0,\n        retain: false\n    });\n}\n\n// Return array: Node-RED sends each element as a separate message to output 0\nreturn [out];",
+    "func": "// AULA MQTT Formatter\n// Converts raw AULA thread data into per-topic MQTT messages.\n// Returns an array so Node-RED sends each element as a separate message.\n//\n// Topics (relative to PREFIX):\n//   {PREFIX}          — full thread summary (retained)\n//   {PREFIX}/status   — heartbeat with counts (retained)\n//   {PREFIX}/{id}     — per-thread detail with messages (retained)\n//   {PREFIX}/unread   — unread threads only (NOT retained)\n\nconst PREFIX = env.get('MQTT_TOPIC_PREFIX') || 'aula/messages';\nconst data = msg.payload;\n\nif (!data || !data.threads) { node.warn('Ingen AULA-data at publicere'); return null; }\n\nfunction stripHtml(html) {\n    if (!html) return '';\n    return String(html).replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n}\n\nconst out = [];\n\n// 1. Status/heartbeat\nout.push({\n    topic: PREFIX + '/status',\n    payload: JSON.stringify({ timestamp: data.timestamp, threadCount: data.threadCount, unreadCount: data.unreadCount }),\n    qos: 1,\n    retain: true\n});\n\n// 2. Summary of all threads\nout.push({\n    topic: PREFIX,\n    payload: JSON.stringify({\n        timestamp: data.timestamp,\n        threadCount: data.threadCount,\n        unreadCount: data.unreadCount,\n        threads: data.threads.map(function (item) {\n            return { id: item.thread.id, subject: item.thread.subject || '', read: item.thread.read || false, messageCount: item.messages.length };\n        })\n    }),\n    qos: 1,\n    retain: true\n});\n\n// 3. Per-thread detail\ndata.threads.forEach(function (item) {\n    var t = item.thread;\n    var formatted = item.messages\n        .filter(function (m) { return !m.messageType || m.messageType === 'Message'; })\n        .map(function (m) {\n            var text = '';\n            try { text = (m.text && m.text.html) ? stripHtml(m.text.html) : stripHtml(String(m.text || '')); } catch (e) {}\n            return {\n                id: m.id,\n                sendDateTime: m.sendDateTime,\n                sender: (m.sender && m.sender.fullName) ? m.sender.fullName : 'Unknown',\n                text: text,\n                messageType: m.messageType || 'Message'\n            };\n        });\n    out.push({\n        topic: PREFIX + '/' + t.id,\n        payload: JSON.stringify({ id: t.id, subject: t.subject || '', read: t.read || false, messageCount: formatted.length, messages: formatted }),\n        qos: 1,\n        retain: true\n    });\n});\n\n// 4. Unread only (not retained — for HA automations)\nvar unread = data.threads.filter(function (item) { return !item.thread.read; });\nif (unread.length > 0) {\n    out.push({\n        topic: PREFIX + '/unread',\n        payload: JSON.stringify({ timestamp: data.timestamp, count: unread.length, threads: unread.map(function (item) { return { id: item.thread.id, subject: item.thread.subject || '' }; }) }),\n        qos: 0,\n        retain: false\n    });\n}\n\nreturn [out];",
     "outputs": 1,
     "timeout": 0,
     "noerr": 0,
     "initialize": "",
     "finalize": "",
     "libs": [],
-    "x": 580,
-    "y": 120,
+    "x": 620,
+    "y": 240,
     "wires": [["aula-mq-out"]]
   },
   {
@@ -82,8 +121,8 @@
     "correl": "",
     "expiry": "",
     "broker": "aula-mb-cfg",
-    "x": 780,
-    "y": 120,
+    "x": 820,
+    "y": 240,
     "wires": []
   },
   {
@@ -99,8 +138,8 @@
     "targetType": "msg",
     "statusVal": "",
     "statusType": "auto",
-    "x": 620,
-    "y": 200,
+    "x": 960,
+    "y": 180,
     "wires": []
   },
   {
@@ -110,8 +149,8 @@
     "name": "Error Handler",
     "scope": null,
     "uncaught": false,
-    "x": 150,
-    "y": 220,
+    "x": 140,
+    "y": 320,
     "wires": [["aula-dbg-err"]]
   },
   {
@@ -120,7 +159,7 @@
     "z": "aula-tab-v1",
     "name": "Error details",
     "active": true,
-    "tosidebar":  true,
+    "tosidebar": true,
     "console": false,
     "tostatus": false,
     "complete": "true",
@@ -128,7 +167,7 @@
     "statusVal": "",
     "statusType": "auto",
     "x": 360,
-    "y": 220,
+    "y": 320,
     "wires": []
   },
   {

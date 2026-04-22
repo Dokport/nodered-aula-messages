@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-04-22
+
+### Changed
+
+- **Replaced `fetch` with Node-RED native `http request` node** — fixes "fetch is not defined"
+  on Node.js < 18. Flow now works on any Node-RED installation regardless of Node.js version.
+- Redesigned as a state-machine with two function nodes (**Setup Request** + **Process Response**)
+  around a single **http request** node. Flow context holds pagination state between iterations.
+- Poll loop is now explicit: Process Response output 1 loops back to Setup Request (more pages),
+  output 2 forwards to MQTT Formatter (all done).
+
+---
+
 ## [1.1.0] - 2026-04-22
 
 ### Changed
